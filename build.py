@@ -5,8 +5,11 @@ head_end = src.index('</style>') + len('</style>')
 head, body = src[:head_end], src[head_end:]
 extra_css = """
 /* Отступы под вырез, «домой»-полоску и панели Telegram */
-:root{--sab:max(env(safe-area-inset-bottom,0px),var(--tg-safe-area-inset-bottom,0px))}
-html{padding-top:env(safe-area-inset-top,0px)}
+/* В полноэкранном режиме Telegram сверху свои кнопки «Закрыть» и «⋯» — отступаем на их высоту */
+:root{--sat:calc(var(--tg-safe-area-inset-top,0px) + var(--tg-content-safe-area-inset-top,0px));
+  --sab:max(env(safe-area-inset-bottom,0px),calc(var(--tg-safe-area-inset-bottom,0px) + var(--tg-content-safe-area-inset-bottom,0px)))}
+html{padding-top:max(env(safe-area-inset-top,0px),var(--sat))}
+.sheet{max-height:calc(100% - 24px - max(env(safe-area-inset-top,0px),var(--sat)))}
 [hidden]{display:none!important}
 img{max-width:100%}
 .view{padding-bottom:calc(104px + var(--sab))}
