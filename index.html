@@ -360,8 +360,13 @@ h1,h2,h3{text-wrap:balance;margin:0}
 .foot-hint{margin:0;text-align:center;font-size:12.5px;color:var(--muted)}
 .field{display:flex;flex-direction:column;gap:8px;min-width:0}
 .lbl{font:600 11px var(--font);text-transform:uppercase;letter-spacing:.09em;color:var(--faint)}
-input[type=text],input[type=search],input[type=tel],input[type=number],input[type=date],select,textarea{width:100%;min-width:0;height:48px;padding:0 14px;border-radius:15px;border:1px solid var(--glass-line);background:var(--field-bg);color:var(--ink);font:500 16px var(--font)}
+input[type=text],input[type=search],input[type=tel],input[type=number],input[type=date],input[type=month],select,textarea{width:100%;min-width:0;height:48px;padding:0 14px;border-radius:15px;border:1px solid var(--glass-line);background:var(--field-bg);color:var(--ink);font:500 16px var(--font)}
 input[type=text],input[type=search],input[type=tel],input[type=number]{-webkit-appearance:none;appearance:none}
+/* iOS рисует дату по-своему: по центру и шире ячейки — выравниваем как остальные поля */
+input[type=date],input[type=month]{-webkit-appearance:none;appearance:none;display:block;max-width:100%;text-align:left;line-height:46px;min-height:48px}
+input[type=date]::-webkit-date-and-time-value,input[type=month]::-webkit-date-and-time-value{text-align:left;margin:0}
+/* Иконка поиска не должна наезжать на текст */
+.search input[type=search]{padding-left:42px}
 input:focus,select:focus,textarea:focus{outline:none;border-color:var(--violet);box-shadow:0 0 0 3px rgba(139,108,255,.25)}
 input::placeholder,textarea::placeholder{color:var(--faint)}
 select option,select optgroup{background:var(--opt-bg);color:var(--ink)}
