@@ -217,6 +217,7 @@ h1,h2,h3{text-wrap:balance;margin:0}
 .etop{display:flex;justify-content:space-between;align-items:baseline;gap:10px}
 .etop b{font:600 16px/1.25 var(--font);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .etop .pr{font:600 15px var(--font);white-space:nowrap;font-variant-numeric:tabular-nums}
+.etop .pr small{font:500 11.5px var(--font);opacity:.8;margin-left:1px}
 .emeta{font:500 12.5px var(--font);color:rgba(255,255,255,.8);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .epay{align-self:flex-start;margin-top:6px;height:24px;padding:0 10px;border-radius:999px;display:inline-flex;align-items:center;font:600 11.5px var(--font);background:rgba(255,255,255,.22);color:#fff}
 .epay.due{background:#FF6B86}
@@ -391,6 +392,11 @@ input.amount{height:64px;font:300 34px var(--font);letter-spacing:-.01em}
 .stepper button{width:38px;height:38px;border-radius:12px;background:var(--glass);border:1px solid var(--glass-line-2);font-size:18px;line-height:1;text-align:center}
 .stepper b{min-width:24px;text-align:center;font:600 17px var(--font)}
 .catgrid{display:flex;flex-wrap:wrap;gap:6px}
+.daypick{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:5px}
+.daypick .chip{padding:0;text-align:center;height:38px}
+.subtag{display:inline-flex;align-items:center;height:20px;padding:0 8px;border-radius:999px;font:600 10.5px var(--font);background:var(--glass-2);color:var(--link);vertical-align:2px;margin-left:6px}
+.skips{display:flex;flex-wrap:wrap;gap:6px}
+.skips .chip{height:30px;font-size:12px}
 .chip.add{border-style:dashed;border-color:var(--glass-line-2);color:var(--link);background:transparent}
 .ctiles{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
 .ctile{position:relative;display:flex;flex-direction:column;align-items:flex-start;gap:3px;padding:12px;border-radius:18px;background:var(--card-grad);border:1px solid var(--glass-line);text-align:left;min-width:0;box-shadow:var(--shadow-card)}
@@ -675,6 +681,8 @@ const decExp = (name, str) => {
   const y = name.slice(1,5), m = name.slice(5,7);
   return JSON.parse(str).map(r => ({id:r[0], date:`${y}-${m}-${pad(r[1])}`, cat:r[2], amount:r[3], note:r[4] || ''}));
 };
+const encSub = list => JSON.stringify(list.map(sb => [sb.id, sb.tenantId, sb.resourceId, sb.days.reduce((mk, x) => mk | (1 << x), 0), sb.price, sb.from, sb.to || 0, sb.note || 0, sb.pays || {}, sb.skip || []]));
+const decSub = str => str ? JSON.parse(str).map(r => ({id:r[0], tenantId:r[1], resourceId:r[2], days:[0,1,2,3,4,5,6].filter(x => r[3] & (1 << x)), price:r[4], from:r[5], to:r[6] || null, note:r[7] || '', pays:r[8] || {}, skip:r[9] || []})) : [];
 const encRec = list => JSON.stringify(list.map(r => [r.id, r.cat, r.amount, r.note || 0, r.day, r.from, r.to || 0]));
 const decRec = str => str ? JSON.parse(str).map(r => ({id:r[0], cat:r[1], amount:r[2], note:r[3] || '', day:r[4], from:r[5], to:r[6] || null})) : [];
 
@@ -693,16 +701,42 @@ const defaultCfg = () => ({minDur:60, cats:defaultCats(), resources:[
   {id:'b2', kind:'bar', name:'Барбер 2',  note:'', hour:400, day:4800, active:true}
 ]});
 let cfg = defaultCfg();
-let tenants = [], bookings = [], expenses = [], recurring = [];
+let tenants = [], bookings = [], expenses = [], recurring = [], subs = [];
 const usage = {keys:0};
 let pending = 0, lastError = '', cfgSeeded = false;
 
 const res = id => cfg.resources.find(r => r.id === id) || {id, kind:'cab', name:'Удалённое место', hour:0, day:0, active:false, note:''};
 const ten = id => tenants.find(t => t.id === id) || {id:'', name:'—', activity:'', phone:'', tg:'', note:''};
 const calcPrice = (r, kind, start, end) => kind === 'full_day' ? r.day : Math.round(r.hour * (end - start) / 60);
+/* Постоянная аренда: место занято в выбранные дни недели целиком, оплата — фиксированная сумма за месяц */
+const DOW_ORDER = [1,2,3,4,5,6,0];
+const daysTxt = days => days.length === 7 ? 'каждый день' : DOW_ORDER.filter(x => days.includes(x)).map(x => DOW[x]).join(', ');
+const subActive = (sb, ym) => !!sb.from && sb.from <= ym && (!sb.to || ym <= sb.to);
+const rangesOverlap = (aF, aT, bF, bT) => aF <= (bT || '9999-12') && bF <= (aT || '9999-12');
+const monthName = ym => MONTHS[+ym.slice(5,7) - 1].toLowerCase();
+function subItems(date){
+  const dow = parse(date).getDay(), ym = date.slice(0,7);
+  return subs.filter(sb => subActive(sb, ym) && sb.days.includes(dow) && !sb.skip.includes(date)).map(sb => ({id:'v_' + sb.id + '_' + date, virtual:true, sub:sb, tenantId:sb.tenantId, resourceId:sb.resourceId, date, kind:'full_day', start:OPEN, end:CLOSE, price:0, priceManual:false, status:'active', payment:sb.pays[ym] || 'unpaid', seriesId:null, comment:''}));
+}
+const dayItems = date => bookings.filter(b => b.date === date && b.status !== 'cancelled').concat(subItems(date));
+function subDaysIn(sb, ym){
+  if (!subActive(sb, ym)) return 0;
+  const [y, m] = ym.split('-').map(Number), n = new Date(y, m, 0).getDate();
+  let c = 0;
+  for (let i = 1; i <= n; i++) if (sb.days.includes(new Date(y, m-1, i).getDay()) && !(sb.skip || []).includes(`${ym}-${pad(i)}`)) c++;
+  return c;
+}
+const subPayState = (sb, ym) => sb.pays[ym] ? 'paid' : ym <= NOW_YM ? 'debt' : 'future';
+function ymRange(from, to){
+  const out = []; let [y, m] = from.split('-').map(Number); const [ty, tm] = to.split('-').map(Number);
+  while ((y < ty || (y === ty && m <= tm)) && out.length < 600){ out.push(`${y}-${pad(m)}`); m++; if (m > 12){ m = 1; y++; } }
+  return out;
+}
+const fullSubOf = rid => subs.find(sb => sb.resourceId === rid && sb.days.length === 7 && subActive(sb, NOW_YM));
 const clash = (resourceId, date, start, end, exceptId) => bookings.filter(b =>
-  b.id !== exceptId && b.status !== 'cancelled' && b.resourceId === resourceId && b.date === date && b.start < end && start < b.end);
-const isCharged = b => b.status === 'active' || (b.status === 'no_show' && b.payment !== 'unpaid');
+  b.id !== exceptId && b.status !== 'cancelled' && b.resourceId === resourceId && b.date === date && b.start < end && start < b.end)
+  .concat(subItems(date).filter(v => v.resourceId === resourceId && v.start < end && start < v.end));
+const isCharged = b => !b.virtual && (b.status === 'active' || (b.status === 'no_show' && b.payment !== 'unpaid'));
 const catName = id => (cfg.cats.find(c => c.id === id) || {name:'Без статьи'}).name;
 const firstCat = () => (cfg.cats.find(c => !c.hidden) || cfg.cats[0] || {id:0}).id;
 const catUsed = id => expenses.some(e => e.cat === id) || recurring.some(r => r.cat === id);
@@ -719,6 +753,7 @@ async function loadAll(){
   cfg = cfgStr ? decCfg(cfgStr) : defaultCfg();
   tenants = decTen(joinFrom('ten', vals));
   recurring = decRec(joinFrom('rex', vals));
+  subs = decSub(joinFrom('sub', vals));
   const bl = [], el = [];
   heads.forEach(h => {
     if (/^m\d{6}$/.test(h)) bl.push(...decMonth(h, joinFrom(h, vals)));
@@ -789,6 +824,16 @@ function persistRecurring(changed, deletedIds){
     render();
   });
 }
+function persistSubs(changed, deletedIds){
+  const ids = new Set(changed.map(x => x.id).concat(deletedIds || []));
+  return persist(async () => {
+    const fresh = decSub(await readBlob('sub'));
+    const next = fresh.filter(x => !ids.has(x.id)).concat(changed);
+    await writeBlob('sub', encSub(next));
+    subs = next;
+    render();
+  });
+}
 function persistTenant(t){
   return persist(async () => {
     const fresh = decTen(await readBlob('ten'));
@@ -821,7 +866,13 @@ async function seedDemo(){
   const ts = T.map((r, i) => ({id:'t' + (i+1), name:r[0], activity:r[1], phone:r[2], tg:r[3], note:r[4]}));
   const pools = {cab:['t1','t2','t8','t9','t10','t11','t2','t8'], sty:['t4','t5','t12','t3','t4'], bar:['t7','t6']};
   const list = [];
-  const busy = (rid, date, s, e) => list.some(b => b.status !== 'cancelled' && b.resourceId === rid && b.date === date && b.start < e && s < b.end);
+  const from0 = new Date(now.getFullYear(), now.getMonth() - 1, 1), ym0 = ymOf(from0.getFullYear(), from0.getMonth());
+  const sb = [
+    {id:'p1', tenantId:'t9', resourceId:'c4', days:[0,1,2,3,4,5,6], price:42000, from:ym0, to:null, note:'', pays:{[ym0]:'transfer'}, skip:[]},
+    {id:'p2', tenantId:'t10', resourceId:'s2', days:[1,3], price:6000, from:ym0, to:null, note:'', pays:{[ym0]:'cash', [NOW_YM]:'cash'}, skip:[]}
+  ];
+  const subBusy = (rid, date) => sb.some(x => x.resourceId === rid && subActive(x, date.slice(0,7)) && x.days.includes(parse(date).getDay()));
+  const busy = (rid, date, s, e) => subBusy(rid, date) || list.some(b => b.status !== 'cancelled' && b.resourceId === rid && b.date === date && b.start < e && s < b.end);
   const add = (rid, tid, kind, s, e, date, series) => {
     if (busy(rid, date, s, e)) return;
     let status = 'active', payment = 'unpaid';
@@ -864,6 +915,7 @@ async function seedDemo(){
   await writeBlob('cfg', encCfg());
   await writeBlob('ten', encTen(ts));
   await writeBlob('rex', encRec(rec));
+  await writeBlob('sub', encSub(sb));
   const byMonth = {}, byExp = {};
   list.forEach(b => (byMonth[mkey(b.date)] = byMonth[mkey(b.date)] || []).push(b));
   ex.forEach(e => (byExp[ekey(e.date)] = byExp[ekey(e.date)] || []).push(e));
@@ -888,12 +940,13 @@ function statsFor(dates, resList){
     mins += b.end - b.start; cnt++;
     if (isCharged(b)){ charged += b.price; if (b.payment === 'unpaid' && b.date <= TODAY){ debt += b.price; debtCnt++; } }
   }
+  if (subs.length) for (const dd of dates) for (const v of subItems(dd)) if (ids.has(v.resourceId)){ mins += DAY_MIN; cnt++; }
   const cap = resList.length * DAY_MIN * dates.length;
   return {occ:cap ? mins/cap : 0, mins, cnt, charged, debt, debtCnt};
 }
 function hourlyOcc(date, resList){
   const ids = new Set(resList.map(r => r.id)), out = Array(12).fill(0);
-  for (const b of bookings){
+  for (const b of bookings.concat(subItems(date))){
     if (b.date !== date || b.status === 'cancelled' || !ids.has(b.resourceId)) continue;
     for (let h = 0; h < 12; h++){ const s = OPEN + h*60, e = s + 60; out[h] += Math.max(0, Math.min(e, b.end) - Math.max(s, b.start)); }
   }
@@ -938,6 +991,21 @@ function analytics(y, m){
     else if (b.date <= TODAY){ a.debt += b.price; t.debt += b.price; }
     else a.expected += b.price;
   }
+  a.subs = []; a.subRev = 0;
+  for (const sb of subs){
+    if (!subActive(sb, prefix)) continue;
+    const n = subDaysIn(sb, prefix), mins = n * DAY_MIN, r = res(sb.resourceId);
+    const t = a.ten[sb.tenantId] || (a.ten[sb.tenantId] = {rev:0, paid:0, debt:0, mins:0, count:0});
+    t.sub = true; t.mins += mins; a.mins += mins;
+    if (a.kinds[r.kind]){ a.kinds[r.kind].mins += mins; a.kinds[r.kind].rev += sb.price; }
+    if (a.res[r.id]){ a.res[r.id].mins += mins; a.res[r.id].rev += sb.price; }
+    a.revenue += sb.price; t.rev += sb.price; a.subRev += sb.price;
+    const st = subPayState(sb, prefix);
+    if (st === 'paid'){ a.paid += sb.price; t.paid += sb.price; }
+    else if (st === 'debt'){ a.debt += sb.price; t.debt += sb.price; }
+    else a.expected += sb.price;
+    a.subs.push({sb, n, st});
+  }
   a.occ = act.length ? a.mins / (act.length * DAY_MIN * days) : 0;
   a.exp = expensesFor(y, m);
   a.profit = a.revenue - a.exp.total;
@@ -953,6 +1021,10 @@ function analyticsCSV(y, m){
     const p = ten(id);
     rows.push([p.name, p.activity, t.count, num(t.mins/60), t.rev, t.paid, t.debt, a.revenue ? num(t.rev/a.revenue*100) : '0']);
   });
+  if (a.subs.length){
+    rows.push([], ['Постоянная аренда','Место','Дни','Дней в месяце','Сумма, ₽','Оплата']);
+    a.subs.forEach(({sb, n, st}) => rows.push([ten(sb.tenantId).name, res(sb.resourceId).name, daysTxt(sb.days), n, sb.price, st === 'paid' ? PAY[sb.pays[ymOf(y, m)]] : st === 'debt' ? 'не оплачено' : 'впереди']));
+  }
   rows.push([], ['Расход','Категория','Дата','Сумма, ₽','Ежемесячный']);
   a.exp.rec.concat(a.exp.one).sort((x, z) => x.date.localeCompare(z.date)).forEach(e => rows.push([e.note || catName(e.cat), catName(e.cat), e.date.split('-').reverse().join('.'), e.amount, e.rec ? 'да' : 'нет']));
   return rows.map(r => r.map(v => { const s = String(v ?? ''); return /[;"\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s; }).join(';')).join('\n');
@@ -1032,6 +1104,7 @@ function homeHTML(){
     if (b.status === 'cancelled' || !ids.has(b.resourceId)) continue;
     const p = per[b.date] || (per[b.date] = {mins:0, cnt:0}); p.mins += b.end - b.start; p.cnt++;
   }
+  if (subs.length) for (const ds of dates) for (const v of subItems(ds)) if (ids.has(v.resourceId)){ const p = per[ds] || (per[ds] = {mins:0, cnt:0}); p.mins += DAY_MIN; p.cnt++; }
   const st = statsFor(dates, vis);
   let cells = '';
   for (let i = 0; i < (first.getDay() + 6) % 7; i++) cells += '<span class="dc blank" aria-hidden="true"></span>';
@@ -1061,6 +1134,10 @@ function homeHTML(){
 
 function blockHTML(b){
   const r = res(b.resourceId), t = ten(b.tenantId);
+  if (b.virtual){
+    const due = subPayState(b.sub, b.date.slice(0,7)) === 'debt';
+    return `<button class="bk ${r.kind} full${due ? ' unpaid' : ''}" style="top:1px;height:${48*SLOT - 2}px" data-action="open-sub" data-id="${b.sub.id}" data-date="${b.date}" aria-label="${esc(t.name)}, постоянная аренда, ${esc(r.name)}"><span class="who">${esc(shortName(t.name))}</span><span class="t">Постоянно</span><span class="t">${rub(b.sub.price)}/мес</span></button>`;
+  }
   const top = (b.start - OPEN) / STEP * SLOT, h = (b.end - b.start) / STEP * SLOT - 2;
   const time = b.kind === 'full_day' ? 'Весь день' : `${hm(b.start)}–${hm(b.end)}`;
   const cls = ['bk', r.kind, b.kind === 'full_day' ? 'full' : '', b.payment === 'unpaid' && b.status === 'active' ? 'unpaid' : '', b.status === 'no_show' ? 'noshow' : '', h < 36 ? 'short' : ''].filter(Boolean).join(' ');
@@ -1068,6 +1145,15 @@ function blockHTML(b){
 }
 function entryHTML(b){
   const r = res(b.resourceId), t = ten(b.tenantId);
+  if (b.virtual){
+    const sb = b.sub, ym = b.date.slice(0,7), st = subPayState(sb, ym), mn = monthName(ym);
+    const payTxt = st === 'paid' ? `${mn[0].toUpperCase() + mn.slice(1)} оплачен · ${PAY[sb.pays[ym]].toLowerCase()}` : st === 'debt' ? `${mn[0].toUpperCase() + mn.slice(1)} не оплачен` : `Оплата за ${mn} впереди`;
+    return `<div class="trow"><div class="ttime"><b>Весь</b><span>день</span></div>
+    <button class="ecard ${r.kind}" data-action="open-sub" data-id="${sb.id}" data-date="${b.date}">
+      <span class="etab">${esc(r.name)} · постоянно</span>
+      <span class="ebody"><span class="etop"><b>${esc(t.name)}</b><span class="pr">${rub(sb.price)}<small>/мес</small></span></span><span class="emeta">${esc(daysTxt(sb.days))}${t.activity ? ' · ' + esc(t.activity) : ''}</span><span class="epay${st === 'debt' ? ' due' : ''}">${payTxt}</span></span>
+    </button></div>`;
+  }
   const unpaid = b.payment === 'unpaid' && b.status === 'active', due = unpaid && b.date <= TODAY;
   const pay = b.status === 'no_show' ? 'Не пришёл' : unpaid ? (due ? 'Не оплачено' : 'Оплата при визите') : PAY[b.payment];
   const time = b.kind === 'full_day' ? '<b>Весь</b><span>день</span>' : `<b>${hm(b.start)}</b><span>${hm(b.end)}</span>`;
@@ -1089,7 +1175,7 @@ function dayHTML(){
   let body;
   if (!vis.length) body = '<div class="empty">В этом фильтре нет мест.</div>';
   else if (state.dayView === 'list'){
-    const list = bookings.filter(b => b.date === date && b.status !== 'cancelled' && ids.has(b.resourceId))
+    const list = dayItems(date).filter(b => ids.has(b.resourceId))
       .sort((a, b) => a.start - b.start || KIND_ORDER.indexOf(res(a.resourceId).kind) - KIND_ORDER.indexOf(res(b.resourceId).kind));
     body = `<div class="tline" id="dayList">${list.length ? list.map(entryHTML).join('') : '<div class="empty">На этот день записей нет.<br>Нажмите «+», чтобы записать арендатора.</div>'}</div>`;
   } else {
@@ -1099,7 +1185,7 @@ function dayHTML(){
     for (let t = OPEN; t <= CLOSE; t += 60) times += `<span style="top:${(t-OPEN)/STEP*SLOT}px"${t === OPEN ? ' class="first"' : t === CLOSE ? ' class="last"' : ''}>${hm(t)}</span>`;
     const showNow = date === TODAY && NOW_MIN > OPEN && NOW_MIN < CLOSE;
     const cols = vis.map(r => {
-      const bs = bookings.filter(b => b.resourceId === r.id && b.date === date && b.status !== 'cancelled').sort((a,b) => a.start - b.start);
+      const bs = dayItems(date).filter(b => b.resourceId === r.id).sort((a,b) => a.start - b.start);
       return `<div class="col" data-action="slot" data-res="${r.id}" title="Нажмите на свободное время, чтобы записать">${bs.map(blockHTML).join('')}${showNow ? `<span class="now" style="top:${(NOW_MIN-OPEN)/STEP*SLOT}px"></span>` : ''}</div>`;
     }).join('');
     body = `<div class="grid-scroll" id="gridScroll"><div class="grid" style="grid-template-columns:48px repeat(${n},minmax(96px,1fr));min-width:${48 + n*96}px"><div class="corner"></div>${head}<div class="times">${times}</div>${cols}</div></div>`;
@@ -1127,7 +1213,12 @@ function tenantSummary(id){
     if (isCharged(b)){ charged += b.price; if (b.payment === 'unpaid' && b.date <= TODAY) debt += b.price; }
     if (b.status === 'active' && b.date >= TODAY && (!next || b.date < next.date || (b.date === next.date && b.start < next.start))) next = b;
   }
-  return {count, mins, charged, debt, next};
+  const own = subs.filter(sb => sb.tenantId === id);
+  for (const sb of own){
+    const end = sb.to && sb.to < NOW_YM ? sb.to : NOW_YM;
+    if (sb.from <= end) for (const ym of ymRange(sb.from, end)){ charged += sb.price; if (!sb.pays[ym]) debt += sb.price; }
+  }
+  return {count, mins, charged, debt, next, subs:own, activeSub:own.find(sb => subActive(sb, NOW_YM))};
 }
 function tenantRows(){
   const q = norm(state.tq);
@@ -1136,7 +1227,9 @@ function tenantRows(){
   if (!list.length) return `<div class="empty">Никого не нашли. <button class="link-btn" data-action="new-tenant">Добавить «${esc(state.tq.trim())}»</button></div>`;
   return list.map(t => {
     const s = tenantSummary(t.id);
-    return `<button class="lrow" data-action="open-tenant" data-id="${t.id}">${avatar(t)}<span class="lmain"><b>${esc(t.name)}</b><small>${esc(t.activity || 'Род занятий не указан')}${s.next ? ` · след. ${dowDate(s.next.date)}` : ''}</small></span><span class="lside">${s.debt ? `<b class="bad">${rub(s.debt)}</b><small>долг</small>` : `<b>${s.count}</b><small>${plural(s.count,'бронь','брони','броней')}</small>`}</span></button>`;
+    const sub2 = s.activeSub ? `постоянно: ${res(s.activeSub.resourceId).name}, ${daysTxt(s.activeSub.days)}` : '';
+    const side = s.debt ? `<b class="bad">${rub(s.debt)}</b><small>долг</small>` : s.activeSub && !s.count ? `<b>${rub(s.activeSub.price)}</b><small>в месяц</small>` : `<b>${s.count}</b><small>${plural(s.count,'бронь','брони','броней')}</small>`;
+    return `<button class="lrow" data-action="open-tenant" data-id="${t.id}">${avatar(t)}<span class="lmain"><b>${esc(t.name)}</b><small>${esc(sub2 || t.activity || 'Род занятий не указан')}${!sub2 && s.next ? ` · след. ${dowDate(s.next.date)}` : ''}</small></span><span class="lside">${side}</span></button>`;
   }).join('');
 }
 const tenantsHTML = () => `<section>
@@ -1160,7 +1253,7 @@ function financeHTML(){
   return `<section>${head}${state.fin === 'summary' ? summaryHTML(a, p, pd, isNow, m) : expensesHTML(a, m)}</section>`;
 }
 function summaryHTML(a, p, pd, isNow, m){
-  if (!a.count && !a.exp.total) return `<div class="empty">В ${MONTHS_PREP[m]} нет ни броней, ни расходов.</div>`;
+  if (!a.count && !a.exp.total && !a.subs.length) return `<div class="empty">В ${MONTHS_PREP[m]} нет ни броней, ни расходов.</div>`;
   const pDelta = p.revenue || p.exp.total ? (() => { const d = p.profit ? Math.round((a.profit - p.profit) / Math.abs(p.profit) * 100) : null; return d === null ? '' : ` · <b>${d >= 0 ? '+' : '−'}${Math.abs(d)}%</b> к ${MONTHS_DAT[pd.getMonth()]}`; })() : '';
   const hero = `<div class="herocard${a.profit < 0 ? ' neg' : ''}">${waveSVG()}
     <div class="h-top"><span>Прибыль за ${MONTHS[m].toLowerCase()}</span><small>выручка − расходы</small></div>
@@ -1175,6 +1268,9 @@ function summaryHTML(a, p, pd, isNow, m){
     <div class="tile${a.cashProfit < 0 ? ' bad' : ''}"><span class="badge">${ICON.wallet}</span><span>Касса после расходов</span><b>${sRub(a.cashProfit)}</b><small>получено − расходы</small></div>
   </div>`;
 
+  const fym = ymOf(state.ay, state.am);
+  const subsSec = a.subs.length ? `<div class="sec-h"><h2>Постоянная аренда</h2><small>${rub(a.subRev)} в месяц</small></div><div class="list">${a.subs.map(({sb, n, st}) => { const tt = ten(sb.tenantId), rr = res(sb.resourceId);
+    return `<button class="lrow" data-action="open-sub" data-id="${sb.id}" data-ym="${fym}">${avatar(tt)}<span class="lmain"><b>${esc(tt.name)}</b><small>${esc(rr.name)} · ${esc(daysTxt(sb.days))} · ${n} ${plural(n,'день','дня','дней')}</small></span><span class="lside"><b>${rub(sb.price)}</b><small${st === 'debt' ? ' class="bad"' : ''}>${st === 'paid' ? 'оплачено' : st === 'debt' ? 'не оплачено' : 'впереди'}</small></span></button>`; }).join('')}</div>` : '';
   const perf = `<div class="sec-h"><h2>Загрузка мест</h2><small>${hours(a.mins)} ч продано</small></div>
     <div class="glass perf">${ringSVG(a.occ, Math.round(a.occ*100) + '%', 'всех мест')}
     <ul>${KIND_ORDER.map(k => { const x = a.kinds[k], occ = x.n ? x.mins / (x.n * DAY_MIN * a.days) : 0; return `<li><i class="dot ${k}"></i><span>${KINDS[k].many}</span><b>${Math.round(occ*100)}%</b><small>${rub(x.rev)} · ${a.revenue ? Math.round(x.rev / a.revenue * 100) : 0}% выручки</small></li>`; }).join('')}</ul></div>`;
@@ -1190,9 +1286,9 @@ function summaryHTML(a, p, pd, isNow, m){
   const maxTen = Math.max(...tl.map(([, t]) => t.rev), 1);
   const people = tl.length ? `<div class="sec-h"><h2>Кто сколько принёс</h2><small>${tl.length} ${plural(tl.length,'арендатор','арендатора','арендаторов')}</small></div><div class="list">${tl.map(([id, t], i) => {
     const pp = ten(id);
-    return `<button class="rank-row" data-action="open-tenant" data-id="${id}"><span class="rk">${i+1}.</span><span class="lmain"><b>${esc(pp.name)}</b><small>${hours(t.mins)} ч · ${t.count} ${plural(t.count,'бронь','брони','броней')}${pp.activity ? ' · ' + esc(pp.activity) : ''}</small></span><span class="lside"><b>${rub(t.rev)}</b>${t.debt ? `<small class="bad">долг ${rub(t.debt)}</small>` : `<small>${a.revenue ? (t.rev / a.revenue * 100).toFixed(1).replace('.', ',') : 0}%</small>`}</span><span class="meter"><i style="width:${(t.rev / maxTen * 100).toFixed(1)}%"></i></span></button>`;
+    return `<button class="rank-row" data-action="open-tenant" data-id="${id}"><span class="rk">${i+1}.</span><span class="lmain"><b>${esc(pp.name)}</b><small>${hours(t.mins)} ч · ${t.count ? `${t.count} ${plural(t.count,'бронь','брони','броней')}` : ''}${t.sub ? `${t.count ? ' · ' : ''}постоянно` : ''}${pp.activity ? ' · ' + esc(pp.activity) : ''}</small></span><span class="lside"><b>${rub(t.rev)}</b>${t.debt ? `<small class="bad">долг ${rub(t.debt)}</small>` : `<small>${a.revenue ? (t.rev / a.revenue * 100).toFixed(1).replace('.', ',') : 0}%</small>`}</span><span class="meter"><i style="width:${(t.rev / maxTen * 100).toFixed(1)}%"></i></span></button>`;
   }).join('')}</div>` : '';
-  return `${hero}${tiles}${perf}${places}${people}
+  return `${hero}${tiles}${subsSec}${perf}${places}${people}
     <div style="margin-top:16px"><button class="btn ghost" data-action="copy-csv">${ICON.copy}<span>Скопировать отчёт для Excel</span></button></div>`;
 }
 function expensesHTML(a, m){
@@ -1218,7 +1314,7 @@ function settingsHTML(){
     if (!list.length) return '';
     const n = list.filter(r => r.active).length;
     return `<div class="sec-h"><h2>${KINDS[k].many}</h2><small>${n} ${plural(n,'место','места','мест')}</small></div><div class="list">${list.map(r =>
-      `<button class="lrow${r.active ? '' : ' off'}" data-action="open-resource" data-id="${r.id}"><span class="ico k-${r.kind}">${KIND_ICON[r.kind]}</span><span class="lmain"><b>${esc(r.name)}</b><small>${esc(r.note || KINDS[k].one)}${r.active ? '' : ' · скрыто'}</small></span><span class="lside"><b>${rub(r.hour)}/ч</b><small>день ${rub(r.day)}</small></span></button>`).join('')}</div>`;
+      `<button class="lrow${r.active ? '' : ' off'}" data-action="open-resource" data-id="${r.id}"><span class="ico k-${r.kind}">${KIND_ICON[r.kind]}</span><span class="lmain"><b>${esc(r.name)}</b><small>${fullSubOf(r.id) ? `сдан целиком · ${esc(ten(fullSubOf(r.id).tenantId).name)}` : esc(r.note || KINDS[k].one)}${r.active ? '' : ' · скрыто'}</small></span><span class="lside">${fullSubOf(r.id) ? `<b>${rub(fullSubOf(r.id).price)}</b><small>в месяц</small>` : `<b>${rub(r.hour)}/ч</b><small>день ${rub(r.day)}</small>`}</span></button>`).join('')}</div>`;
   };
   return `<section>
     <h1 class="ptitle">Места</h1>
@@ -1297,7 +1393,7 @@ function renderSheet(){
   const prevBody = root.querySelector('.sheet-body');
   const fresh = !prevBody, same = root.dataset.k === String(sheet._k);
   const scroll = same && prevBody ? prevBody.scrollTop : 0;
-  const build = {booking:bookingSheet, tenant:tenantSheet, tenantEdit:tenantEditSheet, resource:resourceSheet, priceAll:priceAllSheet, copy:copySheet, restore:restoreSheet, expense:expenseSheet, cats:catsSheet}[sheet.type];
+  const build = {booking:bookingSheet, tenant:tenantSheet, tenantEdit:tenantEditSheet, resource:resourceSheet, priceAll:priceAllSheet, copy:copySheet, restore:restoreSheet, expense:expenseSheet, cats:catsSheet, sub:subSheet}[sheet.type];
   root.innerHTML = `<div class="scrim${fresh ? ' anim' : ''}" data-action="close-sheet"></div><div class="sheet${fresh ? ' anim' : ''}" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">${build()}</div>`;
   root.dataset.k = String(sheet._k);
   const nb = root.querySelector('.sheet-body'); if (nb) nb.scrollTop = scroll;
@@ -1320,7 +1416,7 @@ function openNewBooking(p){
   let start = p.start;
   if (start == null) start = date === TODAY && NOW_MIN >= OPEN && NOW_MIN < CLOSE - minD ? Math.ceil(NOW_MIN / STEP) * STEP : OPEN;
   start = Math.min(Math.max(start, OPEN), CLOSE - minD);
-  const nextStart = Math.min(CLOSE, ...bookings.filter(b => b.resourceId === resourceId && b.date === date && b.status !== 'cancelled' && b.start > start).map(b => b.start));
+  const nextStart = Math.min(CLOSE, ...dayItems(date).filter(b => b.resourceId === resourceId && b.start > start).map(b => b.start));
   let end = Math.min(start + Math.max(60, minD), nextStart);
   if (end - start < minD) end = Math.min(CLOSE, start + minD);
   openSheet({type:'booking', isNew:true, confirm:false, tq:'', d:{id:null, tenantId:p.tenantId || null, resourceId, date, kind:'hourly', start, end, price:0, priceManual:false, payment:'unpaid', status:'active', comment:'', seriesId:null, repeat:0}});
@@ -1351,13 +1447,13 @@ function bookingSheet(){
   const isCancelled = !!(stored && stored.status === 'cancelled');
   const cl = clash(d.resourceId, d.date, d.start, d.end, d.id);
   const tooShort = d.kind === 'hourly' && len < minD;
-  const others = bookings.filter(b => b.id !== d.id && b.status !== 'cancelled' && b.resourceId === d.resourceId && b.date === d.date).sort((a,b) => a.start - b.start);
+  const others = dayItems(d.date).filter(b => b.id !== d.id && b.resourceId === d.resourceId).sort((a,b) => a.start - b.start);
   const gaps = freeGaps(others).filter(([a,b]) => b - a >= minD);
 
   const tenantBlock = t
     ? `<div class="tchip">${avatar(t, 'sm')}<span class="lmain"><b>${esc(t.name)}</b><small>${esc(t.activity || '')}${t.phone ? ' · ' + esc(t.phone) : ''}</small></span><button type="button" class="link-btn" data-action="clear-tenant">Сменить</button></div>`
     : `<div class="search">${ICON.search}<input id="tSearch" type="search" placeholder="Имя или телефон" value="${esc(s.tq)}" autocomplete="off" aria-label="Найти арендатора"></div><div class="tpick" id="tPick">${tenantPick()}</div>`;
-  const resOpts = KIND_ORDER.map(k => { const list = cfg.resources.filter(x => x.kind === k && (x.active || x.id === d.resourceId)); return list.length ? `<optgroup label="${KINDS[k].many}">${list.map(x => `<option value="${x.id}"${x.id === d.resourceId ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}</optgroup>` : ''; }).join('');
+  const resOpts = KIND_ORDER.map(k => { const list = cfg.resources.filter(x => x.kind === k && (x.active || x.id === d.resourceId)); return list.length ? `<optgroup label="${KINDS[k].many}">${list.map(x => `<option value="${x.id}"${x.id === d.resourceId ? ' selected' : ''}>${esc(x.name)}${fullSubOf(x.id) ? ' — сдан' : ''}</option>`).join('')}</optgroup>` : ''; }).join('');
   let startOpts = '', endOpts = '';
   for (let m = OPEN; m < CLOSE; m += STEP) if (m <= CLOSE - minD || m === d.start) startOpts += `<option value="${m}"${m === d.start ? ' selected' : ''}>${hm(m)}</option>`;
   for (let m = d.start + STEP; m <= CLOSE; m += STEP) if (m - d.start >= minD || m === d.end) endOpts += `<option value="${m}"${m === d.end ? ' selected' : ''}>${hm(m)} · ${durTxt(m - d.start)}</option>`;
@@ -1372,7 +1468,7 @@ function bookingSheet(){
   const timeSection = d.kind === 'hourly'
     ? `<div class="row2"><div class="field"><label class="lbl" for="fStart">Начало</label><select id="fStart">${startOpts}</select></div><div class="field"><label class="lbl" for="fEnd">Конец</label><select id="fEnd">${endOpts}</select></div></div>`
     : `<div class="note">Весь день — 10:00–22:00. В эту дату место закрыто для других броней.</div>`;
-  const alerts = (cl.length ? `<div class="alert" role="alert"><b>Время занято:</b> ${cl.map(c => `${esc(ten(c.tenantId).name)}, ${c.kind === 'full_day' ? 'весь день' : hm(c.start) + '–' + hm(c.end)}`).join('; ')}. Выберите свободное окно или другое место.</div>` : '')
+  const alerts = (cl.length ? `<div class="alert" role="alert"><b>Время занято:</b> ${cl.map(c => `${esc(ten(c.tenantId).name)}, ${c.virtual ? 'постоянная аренда' : c.kind === 'full_day' ? 'весь день' : hm(c.start) + '–' + hm(c.end)}`).join('; ')}. Выберите свободное окно или другое место.</div>` : '')
     + (tooShort ? `<div class="alert" role="alert">Минимальная бронь — ${durTxt(minD)}.</div>` : '');
 
   let repeatField = '';
@@ -1382,7 +1478,7 @@ function bookingSheet(){
       const busy = [];
       for (let i = 1; i < d.repeat; i++){ const ds = addDays(d.date, 7*i), c = clash(d.resourceId, ds, d.start, d.end, null); if (c.length) busy.push([ds, c[0]]); }
       info = busy.length
-        ? `<div class="note warn">Свободно ${d.repeat - busy.length} из ${d.repeat} дат. Занято: ${busy.map(([ds, c]) => `${shortDate(ds)} (${esc(shortName(ten(c.tenantId).name))}, ${c.kind === 'full_day' ? 'весь день' : hm(c.start) + '–' + hm(c.end)})`).join('; ')}. Эти даты пропустим.</div>`
+        ? `<div class="note warn">Свободно ${d.repeat - busy.length} из ${d.repeat} дат. Занято: ${busy.map(([ds, c]) => `${shortDate(ds)} (${esc(shortName(ten(c.tenantId).name))}, ${c.virtual ? 'постоянно' : c.kind === 'full_day' ? 'весь день' : hm(c.start) + '–' + hm(c.end)})`).join('; ')}. Эти даты пропустим.</div>`
         : `<div class="note">Все ${d.repeat} ${plural(d.repeat,'дата','даты','дат')} свободны, последняя — ${shortDate(addDays(d.date, 7*(d.repeat-1)))}.</div>`;
     }
     repeatField = `<div class="field"><span class="lbl">Повтор</span>${seg('repeat', [['off','Без повтора'],['on','Каждую неделю']], d.repeat > 1 ? 'on' : 'off')}${d.repeat > 1 ? `<div class="stepper"><button type="button" data-action="rep-dec" aria-label="Меньше недель">−</button><b>${d.repeat}</b><button type="button" data-action="rep-inc" aria-label="Больше недель">+</button><span>${plural(d.repeat,'неделя','недели','недель')} по ${DOW_DAT[parse(d.date).getDay()]}</span></div>${info}` : ''}</div>`;
@@ -1414,7 +1510,7 @@ function bookingSheet(){
       <div class="field"><label class="lbl" for="fRes">Место</label><select id="fRes">${resOpts}</select></div>
       <div class="field"><label class="lbl" for="fDate">Дата</label><input type="date" id="fDate" value="${d.date}"></div>
     </div>
-    <div class="field"><span class="lbl">Тариф</span>${seg('kind', [['hourly','Почасовая'],['full_day','Весь день']], d.kind)}</div>
+    <div class="field"><span class="lbl">Тариф</span>${seg('kind', s.isNew ? [['hourly','Почасовая'],['full_day','Весь день'],['sub','Постоянная']] : [['hourly','Почасовая'],['full_day','Весь день']], d.kind)}${s.isNew ? '<p class="foot-hint" style="text-align:left">«Постоянная» — фиксированные дни недели на весь день и оплата за месяц</p>' : ''}</div>
     ${timeSection}${timeline}${alerts}${repeatField}${priceField}
     <div class="field"><span class="lbl">Оплата</span>${seg('payment', [['unpaid','Не оплачено'],['cash','Наличные'],['card','Карта'],['transfer','Перевод']], d.payment, 'pay')}</div>
     ${!s.isNew && !isCancelled ? `<div class="field"><span class="lbl">Посещение</span>${seg('status', [['active','Состоялась'],['no_show','Не пришёл']], d.status)}</div>` : ''}
@@ -1466,7 +1562,9 @@ function brow(b){
 }
 function tenantSheet(){
   const t = ten(sheet.id), s = tenantSummary(t.id), bs = bookings.filter(b => b.tenantId === t.id);
-  const monthRev = bs.filter(b => b.date.startsWith(NOW_YM) && isCharged(b)).reduce((sum, b) => sum + b.price, 0);
+  const monthRev = bs.filter(b => b.date.startsWith(NOW_YM) && isCharged(b)).reduce((sum, b) => sum + b.price, 0) + s.subs.filter(sb => subActive(sb, NOW_YM)).reduce((sum, sb) => sum + sb.price, 0);
+  const subRows = s.subs.map(sb => { const st = subActive(sb, NOW_YM) ? subPayState(sb, NOW_YM) : null;
+    return `<button class="brow" data-action="open-sub" data-id="${sb.id}"><span class="bdate">${esc(res(sb.resourceId).name)}</span><span class="bmain"><b>${esc(daysTxt(sb.days))}</b><small${st === 'debt' ? ' class="bad"' : ''}>${st ? (st === 'paid' ? `${monthName(NOW_YM)} оплачен` : `${monthName(NOW_YM)} не оплачен`) : sb.to && sb.to < NOW_YM ? `завершена в ${MONTHS_PREP[+sb.to.slice(5) - 1]}` : `с ${ymFrom(sb.from)}`}</small></span><span class="bprice">${rub(sb.price)}/мес</span></button>`; }).join('');
   const upcoming = bs.filter(b => b.date >= TODAY && b.status === 'active').sort((a,b) => a.date.localeCompare(b.date) || a.start - b.start).slice(0, 5);
   const history = bs.filter(b => !(b.date >= TODAY && b.status === 'active')).sort((a,b) => b.date.localeCompare(a.date) || b.start - a.start).slice(0, 8);
   const contacts = [t.phone ? `<div><span>Телефон</span><b>${esc(t.phone)}</b></div>` : '', t.tg ? `<div><span>Telegram</span><b>@${esc(t.tg)}</b></div>` : ''].join('') || '<div><span>Контакты не добавлены</span></div>';
@@ -1480,6 +1578,7 @@ function tenantSheet(){
     </div>
     <div class="field"><span class="lbl">Контакты</span><div class="contacts">${contacts}</div></div>
     ${t.note ? `<div class="field"><span class="lbl">Заметка</span><div class="note">${esc(t.note)}</div></div>` : ''}
+    <div class="field"><span class="lbl">Постоянная аренда</span>${subRows ? `<div class="list">${subRows}</div>` : ''}<button class="btn ghost" data-action="new-sub-tenant">+ Постоянная аренда</button></div>
     <div class="field"><span class="lbl">Ближайшие брони</span>${upcoming.length ? `<div class="list">${upcoming.map(brow).join('')}</div>` : '<div class="note">Будущих броней нет.</div>'}</div>
     <div class="field"><span class="lbl">История</span>${history.length ? `<div class="list">${history.map(brow).join('')}</div>` : '<div class="note">Пока пусто.</div>'}</div>
   </div>
@@ -1511,6 +1610,7 @@ function resourceSheet(){
       <div class="field"><label class="lbl" for="rDay">Весь день, ₽</label><input type="number" id="rDay" min="0" step="100" inputmode="numeric" value="${r.day}"></div>
     </div>
     <div class="note">Новая цена действует для новых броней. У созданных стоимость не меняется.</div>
+    ${sheet.id ? (fullSubOf(r.id) ? `<div class="note warn">Сдан целиком: ${esc(ten(fullSubOf(r.id).tenantId).name)}, ${rub(fullSubOf(r.id).price)} в месяц.</div><button type="button" class="btn ghost" data-action="open-sub" data-id="${fullSubOf(r.id).id}">Открыть аренду</button>` : `<button type="button" class="btn ghost" data-action="rent-whole" data-id="${r.id}">Сдать целиком на каждый день</button>`) : ''}
     <label class="check"><input type="checkbox" id="rActive"${r.active ? ' checked' : ''}>Показывать в расписании</label>
     ${future ? `<div class="note warn">Впереди ${future} ${plural(future,'активная бронь','активные брони','активных броней')}. Скрыть место можно, когда их не останется.</div>` : ''}
   </div><div class="sheet-foot"><button class="btn" data-action="save-resource">Сохранить</button></div>`;
@@ -1531,13 +1631,92 @@ function restoreSheet(){
   let info = '', foot = `<button class="btn" data-action="restore-check">Проверить копию</button>`;
   if (s.error) info = `<div class="alert" role="alert">${esc(s.error)}</div>`;
   if (s.parsed){
-    const p = s.parsed, dates = p.bookings.map(b => b.date).sort(), ne = p.expenses.length + p.recurring.length;
-    info = `<div class="note warn">В копии: ${p.tenants.length} ${plural(p.tenants.length,'арендатор','арендатора','арендаторов')}, ${p.bookings.length} ${plural(p.bookings.length,'бронь','брони','броней')}, ${ne} ${plural(ne,'расход','расхода','расходов')}${dates.length ? `, с ${shortDate(dates[0])} ${dates[0].slice(0,4)} по ${shortDate(dates[dates.length-1])} ${dates[dates.length-1].slice(0,4)}` : ''}. Текущие данные будут полностью заменены.</div>`;
+    const p = s.parsed, dates = p.bookings.map(b => b.date).sort(), ne = p.expenses.length + p.recurring.length, ns = p.subs.length;
+    info = `<div class="note warn">В копии: ${p.tenants.length} ${plural(p.tenants.length,'арендатор','арендатора','арендаторов')}, ${p.bookings.length} ${plural(p.bookings.length,'бронь','брони','броней')}, ${ne} ${plural(ne,'расход','расхода','расходов')}${ns ? `, ${ns} ${plural(ns,'постоянная аренда','постоянные аренды','постоянных аренд')}` : ''}${dates.length ? `, с ${shortDate(dates[0])} ${dates[0].slice(0,4)} по ${shortDate(dates[dates.length-1])} ${dates[dates.length-1].slice(0,4)}` : ''}. Текущие данные будут полностью заменены.</div>`;
     foot = `<button class="btn danger solid" data-action="restore-apply">Заменить все данные</button><button class="btn ghost" data-action="close-sheet">Отмена</button>`;
   }
   return sheetHead('Восстановить из копии', 'Вставьте текст резервной копии') + `<div class="sheet-body">
     <textarea id="restoreText" class="code" placeholder='{"app":"coworking", …}'>${esc(s.text)}</textarea>${info}
   </div><div class="sheet-foot">${foot}</div>`;
+}
+
+/* Постоянная аренда: форма */
+function openSub(o){
+  o = o || {};
+  const ym = o.ym || (o.date ? o.date.slice(0,7) : NOW_YM);
+  let sh;
+  if (o.id){
+    const sb = subs.find(x => x.id === o.id); if (!sb) return;
+    sh = {type:'sub', isNew:false, tq:'', ym, date:o.date || null, confirm:false, d:{id:sb.id, tenantId:sb.tenantId, resourceId:sb.resourceId, days:sb.days.slice(), price:String(sb.price), from:sb.from, to:sb.to || '', note:sb.note, pays:Object.assign({}, sb.pays), skip:sb.skip.slice()}};
+  } else {
+    const p = o.prefill || {};
+    const rid = p.resourceId || (cfg.resources.find(r => r.active && r.kind === 'cab') || cfg.resources[0]).id;
+    const from = p.from || ym;
+    sh = {type:'sub', isNew:true, tq:'', ym:from, date:null, confirm:false, d:{id:null, tenantId:p.tenantId || null, resourceId:rid, days:(p.days || []).slice(), price:'', from, to:'', note:'', pays:{}, skip:[]}};
+  }
+  if (o.replace) replaceSheet(sh); else openSheet(sh);
+}
+function subChecks(d){
+  const other = subs.filter(x => x.id !== d.id && x.resourceId === d.resourceId && x.days.some(day => d.days.includes(day)) && rangesOverlap(x.from, x.to, d.from, d.to || null));
+  const startDate = d.from && `${d.from}-01` > TODAY ? `${d.from}-01` : TODAY;
+  const bk = d.from ? bookings.filter(b => b.status === 'active' && b.resourceId === d.resourceId && b.date >= startDate && (!d.to || b.date.slice(0,7) <= d.to) && d.days.includes(parse(b.date).getDay()) && !d.skip.includes(b.date)).sort((a,b) => a.date.localeCompare(b.date) || a.start - b.start) : [];
+  return {other, bk};
+}
+function subSheet(){
+  const s = sheet, d = s.d, r = res(d.resourceId), t = d.tenantId ? ten(d.tenantId) : null;
+  const ym = d.from && s.ym < d.from ? d.from : s.ym;
+  const draft = {days:d.days, from:d.from, to:d.to || null, skip:d.skip};
+  const active = subActive(draft, ym), n = subDaysIn(draft, ym), price = Math.round(+d.price || 0);
+  const sugg = subDaysIn({days:d.days, from:ym, to:null, skip:[]}, ym) * r.day;
+  const {other, bk} = subChecks(d);
+  const tenantBlock = t
+    ? `<div class="tchip">${avatar(t, 'sm')}<span class="lmain"><b>${esc(t.name)}</b><small>${esc(t.activity || '')}${t.phone ? ' · ' + esc(t.phone) : ''}</small></span><button type="button" class="link-btn" data-action="clear-tenant">Сменить</button></div>`
+    : `<div class="search">${ICON.search}<input id="tSearch" type="search" placeholder="Имя или телефон" value="${esc(s.tq)}" autocomplete="off" aria-label="Найти арендатора"></div><div class="tpick" id="tPick">${tenantPick()}</div>`;
+  const resOpts = KIND_ORDER.map(k => { const list = cfg.resources.filter(x => x.kind === k && (x.active || x.id === d.resourceId)); return list.length ? `<optgroup label="${KINDS[k].many}">${list.map(x => `<option value="${x.id}"${x.id === d.resourceId ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}</optgroup>` : ''; }).join('');
+  const dayChips = DOW_ORDER.map(x => `<button type="button" class="chip" data-action="sub-day" data-v="${x}" aria-pressed="${d.days.includes(x)}">${DOW[x]}</button>`).join('');
+  const all = d.days.length === 7;
+  const alerts = (other.length ? `<div class="alert" role="alert"><b>Эти дни уже заняты постоянной арендой:</b> ${other.map(x => `${esc(ten(x.tenantId).name)} (${esc(daysTxt(x.days))})`).join('; ')}. Выберите другие дни или место.</div>` : '')
+    + (bk.length ? `<div class="alert" role="alert"><b>Пересекаются с бронями: ${bk.length}.</b> ${bk.slice(0, 4).map(b => `${dowDate(b.date)} — ${esc(shortName(ten(b.tenantId).name))}`).join('; ')}${bk.length > 4 ? ' и другие' : ''}. Перенесите их или отмените.<div style="margin-top:8px"><button type="button" class="btn danger" data-action="sub-cancel-bk">Отменить эти брони (${bk.length})</button></div></div>` : '');
+  const info = d.days.length && active ? `<div class="note">В ${MONTHS_PREP[+ym.slice(5) - 1]}: ${n} ${plural(n,'день','дня','дней')}${price && n ? ` · примерно ${rub(price / n)} за день` : ''}${sugg ? `. По тарифу «весь день» эти дни стоили бы ${rub(sugg)}` : ''}.</div>` : '';
+  const pay = active ? `<div class="field"><span class="lbl">Оплата за ${monthName(ym)}</span><div class="seg pay" role="group">${[['unpaid','Не оплачено'],['cash','Наличные'],['card','Карта'],['transfer','Перевод']].map(([v, l]) => `<button type="button" data-action="sub-pay" data-v="${v}" aria-pressed="${(d.pays[ym] || 'unpaid') === v}">${l}</button>`).join('')}</div></div>` : '';
+  const skips = d.skip.length ? `<div class="field"><span class="lbl">Освобождённые дни · нажмите, чтобы вернуть</span><div class="skips">${d.skip.slice().sort().map(x => `<button type="button" class="chip" data-action="sub-unskip" data-v="${x}">${dowDate(x)} ✕</button>`).join('')}</div></div>` : '';
+  const freeBtn = !s.isNew && s.date && !d.skip.includes(s.date) ? `<button type="button" class="btn ghost" data-action="sub-skip-date">Освободить ${shortDate(s.date)} — сдать этот день отдельно</button>` : '';
+  const reason = !t ? 'Выберите арендатора' : !d.days.length ? 'Выберите дни недели' : other.length ? 'Дни заняты другой постоянной арендой' : bk.length ? 'Сначала снимите пересекающиеся брони' : '';
+  let foot;
+  if (s.confirm) foot = `<div class="confirm"><p>Удалить постоянную аренду?</p><button class="btn danger solid" data-action="sub-delete">Удалить</button><button class="btn ghost" data-action="sub-del-back">Отмена</button><p class="foot-hint">Чтобы просто закончить аренду, укажите месяц в поле «По» — история и оплаты сохранятся.</p></div>`;
+  else foot = `<button class="btn" data-action="save-sub"${reason ? ' disabled' : ''}>${s.isNew ? 'Сохранить аренду' : 'Сохранить'}</button>${reason ? `<p class="foot-hint">${reason}</p>` : ''}${s.isNew ? '' : '<button class="btn quiet-danger" data-action="sub-ask-del">Удалить аренду</button>'}`;
+  return sheetHead('Постоянная аренда', s.isNew ? 'Фиксированные дни недели на весь день, оплата за месяц' : `${esc(r.name)} · ${esc(daysTxt(d.days))}`) + `<div class="sheet-body">
+    <div class="field"><span class="lbl">Арендатор</span>${tenantBlock}</div>
+    <div class="row2">
+      <div class="field"><label class="lbl" for="sRes">Место</label><select id="sRes">${resOpts}</select></div>
+      <div class="field"><label class="lbl" for="sPrice">В месяц, ₽</label><input type="number" id="sPrice" inputmode="numeric" min="0" step="500" value="${esc(d.price)}" placeholder="${sugg ? Math.round(sugg / 1000) * 1000 : 30000}"></div>
+    </div>
+    <div class="field"><span class="lbl">Дни недели</span><div class="daypick" role="group">${dayChips}</div><button type="button" class="chip" style="align-self:flex-start" data-action="sub-all" aria-pressed="${all}">Каждый день — место сдано целиком</button></div>
+    <div class="row2">
+      <div class="field"><label class="lbl" for="sFrom">С месяца</label><input type="month" id="sFrom" value="${d.from}"></div>
+      <div class="field"><label class="lbl" for="sTo">По месяц</label><input type="month" id="sTo" value="${d.to || ''}"></div>
+    </div>
+    <p class="foot-hint" style="text-align:left;margin-top:-8px">«По» оставьте пустым, если аренда без срока.</p>
+    ${info}${alerts}${pay}${skips}${freeBtn}
+  </div><div class="sheet-foot">${foot}</div>`;
+}
+function saveSub(){
+  const d = sheet.d;
+  if (!d.tenantId){ toast('Выберите арендатора'); return; }
+  if (!d.days.length){ toast('Выберите дни недели'); return; }
+  const price = Math.round(+d.price || 0);
+  if (!(price > 0)){ toast('Укажите сумму в месяц'); const i = $('#sPrice'); if (i) i.focus(); return; }
+  if (!/^\d{4}-\d{2}$/.test(d.from)){ toast('Укажите, с какого месяца'); return; }
+  if (d.to && d.to < d.from){ toast('Месяц «По» раньше, чем «С»'); return; }
+  const {other, bk} = subChecks(d);
+  if (other.length || bk.length){ toast('Дни заняты — посмотрите предупреждение в форме'); return; }
+  const pays = {}; Object.keys(d.pays).forEach(k => { if (d.pays[k] && d.pays[k] !== 'unpaid') pays[k] = d.pays[k]; });
+  const rec = {id:d.id || newId('p'), tenantId:d.tenantId, resourceId:d.resourceId, days:d.days.slice().sort(), price, from:d.from, to:d.to || null, note:d.note || '', pays, skip:d.skip.slice()};
+  const i = subs.findIndex(x => x.id === rec.id);
+  if (i >= 0) subs[i] = rec; else subs.push(rec);
+  toast(sheet.isNew ? 'Постоянная аренда сохранена' : 'Изменения сохранены'); haptic('success');
+  closeSheet(); render();
+  persistSubs([rec]);
 }
 
 /* Расход: разовый или ежемесячный */
@@ -1647,7 +1826,7 @@ function copyText(text, title, okMsg){
     else fallback();
   } catch(e){ fallback(); }
 }
-const backupJSON = () => JSON.stringify({app:'coworking', v:2, exportedAt:new Date().toISOString(), minDur:cfg.minDur, resources:cfg.resources, cats:cfg.cats, tenants, bookings, expenses, recurring});
+const backupJSON = () => JSON.stringify({app:'coworking', v:2, exportedAt:new Date().toISOString(), minDur:cfg.minDur, resources:cfg.resources, cats:cfg.cats, tenants, bookings, expenses, recurring, subs});
 function parseBackup(text){
   let o;
   try { o = JSON.parse(text); } catch(e){ throw new Error('Текст не похож на резервную копию: не читается как JSON.'); }
@@ -1656,16 +1835,18 @@ function parseBackup(text){
   if (bad) throw new Error('В копии есть повреждённая бронь: ' + JSON.stringify(bad).slice(0, 80));
   o.expenses = Array.isArray(o.expenses) ? o.expenses : [];
   o.recurring = Array.isArray(o.recurring) ? o.recurring : [];
+  o.subs = Array.isArray(o.subs) ? o.subs : [];
   return o;
 }
 function applyBackup(o){
   persist(async () => {
     await kv.del(await kv.keys());
     cfg = {minDur:o.minDur || 60, resources:o.resources, cats:Array.isArray(o.cats) && o.cats.length ? o.cats : defaultCats()};
-    tenants = o.tenants; bookings = o.bookings; expenses = o.expenses; recurring = o.recurring;
+    tenants = o.tenants; bookings = o.bookings; expenses = o.expenses; recurring = o.recurring; subs = o.subs;
     await writeBlob('cfg', encCfg());
     await writeBlob('ten', encTen(tenants));
     if (recurring.length) await writeBlob('rex', encRec(recurring));
+    if (subs.length) await writeBlob('sub', encSub(subs));
     const byMonth = {}, byExp = {};
     bookings.forEach(b => (byMonth[mkey(b.date)] = byMonth[mkey(b.date)] || []).push(b));
     expenses.forEach(e => (byExp[ekey(e.date)] = byExp[ekey(e.date)] || []).push(e));
@@ -1720,6 +1901,7 @@ document.addEventListener('click', e => {
 
     case 'seg': {
       const k = el.dataset.k, v = el.dataset.v;
+      if (k === 'kind' && v === 'sub'){ openSub({replace:true, prefill:{tenantId:d.tenantId, resourceId:d.resourceId, days:[parse(d.date).getDay()], from:d.date.slice(0,7)}}); break; }
       if (k === 'kind'){
         if (v === d.kind) break;
         if (v === 'full_day') d._h = [d.start, d.end];
@@ -1743,6 +1925,27 @@ document.addEventListener('click', e => {
     case 'cancel-one': setStatus([d.id], 'cancelled', 'Бронь отменена'); break;
     case 'cancel-series': { const ids = bookings.filter(b => b.seriesId === d.seriesId && b.date >= d.date && b.status === 'active').map(b => b.id); setStatus(ids, 'cancelled', `Отменено броней: ${ids.length}`); break; }
     case 'restore-booking': setStatus([d.id], 'active', 'Бронь восстановлена'); break;
+
+    case 'open-sub': openSub({id:el.dataset.id, date:el.dataset.date, ym:el.dataset.ym}); break;
+    case 'new-sub-tenant': openSub({prefill:{tenantId:sheet.id}}); break;
+    case 'rent-whole': openSub({prefill:{resourceId:el.dataset.id, days:[0,1,2,3,4,5,6]}}); break;
+    case 'sub-day': { const x = +el.dataset.v; d.days = d.days.includes(x) ? d.days.filter(y => y !== x) : d.days.concat(x); renderSheet(); break; }
+    case 'sub-all': d.days = d.days.length === 7 ? [] : [0,1,2,3,4,5,6]; renderSheet(); break;
+    case 'sub-pay': { const ym = d.from && sheet.ym < d.from ? d.from : sheet.ym; if (el.dataset.v === 'unpaid') delete d.pays[ym]; else d.pays[ym] = el.dataset.v; renderSheet(); break; }
+    case 'sub-unskip': d.skip = d.skip.filter(x => x !== el.dataset.v); renderSheet(); break;
+    case 'sub-skip-date': {
+      const sb = subs.find(x => x.id === d.id); if (!sb) break;
+      sb.skip = sb.skip.concat(sheet.date);
+      toast(`${shortDate(sheet.date)} освобождён — можно записать другого арендатора`); haptic('success');
+      closeSheet(); render(); persistSubs([sb]); break; }
+    case 'sub-cancel-bk': {
+      const {bk} = subChecks(d);
+      bk.forEach(b => { b.status = 'cancelled'; });
+      toast(`Отменено броней: ${bk.length}`); renderSheet(); render(); persistBookings(bk); break; }
+    case 'save-sub': saveSub(); break;
+    case 'sub-ask-del': sheet.confirm = true; renderSheet(); break;
+    case 'sub-del-back': sheet.confirm = false; renderSheet(); break;
+    case 'sub-delete': { const id = d.id; subs = subs.filter(x => x.id !== id); toast('Постоянная аренда удалена'); closeSheet(); render(); persistSubs([], [id]); break; }
 
     case 'open-tenant': openSheet({type:'tenant', id:el.dataset.id}); break;
     case 'new-tenant': openSheet({type:'tenantEdit', id:null, prefill:state.tq.trim()}); break;
@@ -1835,6 +2038,13 @@ document.addEventListener('change', e => {
     else if (id === 'eRec'){ sheet.e.rec = e.target.checked; renderSheet(); }
     return;
   }
+  if (sheet.type === 'sub'){
+    const d = sheet.d;
+    if (id === 'sRes'){ d.resourceId = e.target.value; renderSheet(); }
+    else if (id === 'sFrom' && /^\d{4}-\d{2}$/.test(e.target.value)){ d.from = e.target.value; if (sheet.isNew) sheet.ym = d.from; renderSheet(); }
+    else if (id === 'sTo'){ d.to = e.target.value || ''; renderSheet(); }
+    return;
+  }
   if (sheet.type !== 'booking') return;
   const d = sheet.d;
   switch (id){
@@ -1854,6 +2064,7 @@ document.addEventListener('input', e => {
   else if (id === 'restoreText' && sheet){ sheet.text = e.target.value; }
   else if (id === 'eAmount' && sheet){ sheet.e.amount = e.target.value; }
   else if (id === 'eNote' && sheet){ sheet.e.note = e.target.value; }
+  else if (id === 'sPrice' && sheet){ sheet.d.price = e.target.value; }
 });
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && sheet) closeSheet(); });
 
