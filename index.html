@@ -686,8 +686,9 @@ async function deleteBlob(name){
 }
 
 /* Компактное кодирование: одна бронь ≈ 55 символов */
-const encCfg = () => JSON.stringify({v:1, minDur:cfg.minDur, res:cfg.resources.map(r => [r.id, r.kind, r.name, r.note, r.hour, r.day, r.active ? 1 : 0]), cats:cfg.cats.map(c => [c.id, c.name, c.hidden ? 1 : 0])});
-const decCfg = str => { const o = JSON.parse(str); return {minDur:o.minDur || 60, resources:o.res.map(r => ({id:r[0], kind:r[1], name:r[2], note:r[3] || '', hour:r[4], day:r[5], active:!!r[6]})), cats:o.cats ? o.cats.map(c => ({id:c[0], name:c[1], hidden:!!c[2]})) : defaultCats()}; };
+const CFG_V = 2;
+const encCfg = () => JSON.stringify({v:CFG_V, minDur:cfg.minDur, res:cfg.resources.map(r => [r.id, r.kind, r.name, r.note, r.hour, r.day, r.active ? 1 : 0]), cats:cfg.cats.map(c => [c.id, c.name, c.hidden ? 1 : 0])});
+const decCfg = str => { const o = JSON.parse(str); return {v:o.v || 1, minDur:o.minDur || 60, resources:o.res.map(r => ({id:r[0], kind:r[1], name:r[2], note:r[3] || '', hour:r[4], day:r[5], active:!!r[6]})), cats:o.cats ? o.cats.map(c => ({id:c[0], name:c[1], hidden:!!c[2]})) : defaultCats()}; };
 const encTen = list => JSON.stringify(list.map(t => [t.id, t.name, t.activity || '', t.phone || '', t.tg || '', t.note || '']));
 const decTen = str => str ? JSON.parse(str).map(r => ({id:r[0], name:r[1], activity:r[2], phone:r[3], tg:r[4], note:r[5]})) : [];
 const encMonth = list => JSON.stringify(list.map(b => [b.id, b.resourceId, b.tenantId, +b.date.slice(8), b.kind === 'full_day' ? 1 : 0, (b.start - OPEN) / STEP, (b.end - OPEN) / STEP, b.price, b.priceManual ? 1 : 0, Math.max(0, STATUS_CODES.indexOf(b.status)), Math.max(0, PAY_CODES.indexOf(b.payment)), b.seriesId || 0, b.comment || 0]));
@@ -711,8 +712,9 @@ const decRec = str => str ? JSON.parse(str).map(r => ({id:r[0], cat:r[1], amount
    4. Данные в памяти
    ========================================================= */
 const defaultCats = () => EXP_CATS.map((name, id) => ({id, name, hidden:false}));
-const defaultCfg = () => ({minDur:60, cats:defaultCats(), resources:[
+const defaultCfg = () => ({v:CFG_V, minDur:60, cats:defaultCats(), resources:[
   {id:'c1', kind:'cab', name:'Кабинет 1', note:'', hour:400, day:4800, active:true},
+  {id:'c2', kind:'cab', name:'Кабинет 2', note:'', hour:400, day:4800, active:true},
   {id:'c3', kind:'cab', name:'Кабинет 3', note:'', hour:400, day:4800, active:true},
   {id:'c4', kind:'cab', name:'Кабинет 4', note:'', hour:400, day:4800, active:true},
   {id:'s1', kind:'sty', name:'Стилист 1', note:'', hour:400, day:4800, active:true},
@@ -762,7 +764,7 @@ const catName = id => (cfg.cats.find(c => c.id === id) || {name:'Без стат
 const firstCat = () => (cfg.cats.find(c => !c.hidden) || cfg.cats[0] || {id:0}).id;
 const catUsed = id => expenses.some(e => e.cat === id) || recurring.some(r => r.cat === id);
 const catIco = id => `<span class="cat-ico" style="--h:${(id * 37 + 250) % 360}" aria-hidden="true">${esc(catName(id).slice(0,2))}</span>`;
-const sortRes = list => list.slice().sort((a,b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind));
+const sortRes = list => list.slice().sort((a,b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind) || a.name.localeCompare(b.name, 'ru', {numeric:true}));
 
 async function loadAll(){
   const keys = await kv.keys();
@@ -772,6 +774,14 @@ async function loadAll(){
   heads.forEach(h => { const p = parseHeader(vals[h]); if (p) for (let i = 0; i < p.n; i++) live.add(chunkKey(h, p.ver, i)); });
   const cfgStr = joinFrom('cfg', vals);
   cfg = cfgStr ? decCfg(cfgStr) : defaultCfg();
+  if (cfgStr && cfg.v < 2){   // разово: добавить Кабинет 2, если его ещё нет
+    if (!cfg.resources.some(r => norm(r.name) === 'кабинет 2')){
+      const c1 = cfg.resources.find(r => r.id === 'c1') || {hour:400, day:4800};
+      cfg.resources.push({id:cfg.resources.some(r => r.id === 'c2') ? newId('r') : 'c2', kind:'cab', name:'Кабинет 2', note:'', hour:c1.hour, day:c1.day, active:true});
+    }
+    cfg.v = CFG_V;
+    if (!cfgSeeded){ cfgSeeded = true; persist(() => writeBlob('cfg', encCfg())); }
+  }
   tenants = decTen(joinFrom('ten', vals));
   recurring = decRec(joinFrom('rex', vals));
   subs = decSub(joinFrom('sub', vals));
@@ -1331,7 +1341,7 @@ function expensesHTML(a, m){
 
 function settingsHTML(){
   const grp = k => {
-    const list = cfg.resources.filter(r => r.kind === k);
+    const list = sortRes(cfg.resources.filter(r => r.kind === k));
     if (!list.length) return '';
     const n = list.filter(r => r.active).length;
     return `<div class="sec-h"><h2>${KINDS[k].many}</h2><small>${n} ${plural(n,'место','места','мест')}</small></div><div class="list">${list.map(r =>
@@ -1474,7 +1484,7 @@ function bookingSheet(){
   const tenantBlock = t
     ? `<div class="tchip">${avatar(t, 'sm')}<span class="lmain"><b>${esc(t.name)}</b><small>${esc(t.activity || '')}${t.phone ? ' · ' + esc(t.phone) : ''}</small></span><button type="button" class="link-btn" data-action="clear-tenant">Сменить</button></div>`
     : `<div class="search">${ICON.search}<input id="tSearch" type="search" placeholder="Имя или телефон" value="${esc(s.tq)}" autocomplete="off" aria-label="Найти арендатора"></div><div class="tpick" id="tPick">${tenantPick()}</div>`;
-  const resOpts = KIND_ORDER.map(k => { const list = cfg.resources.filter(x => x.kind === k && (x.active || x.id === d.resourceId)); return list.length ? `<optgroup label="${KINDS[k].many}">${list.map(x => `<option value="${x.id}"${x.id === d.resourceId ? ' selected' : ''}>${esc(x.name)}${fullSubOf(x.id) ? ' — сдан' : ''}</option>`).join('')}</optgroup>` : ''; }).join('');
+  const resOpts = KIND_ORDER.map(k => { const list = sortRes(cfg.resources.filter(x => x.kind === k && (x.active || x.id === d.resourceId))); return list.length ? `<optgroup label="${KINDS[k].many}">${list.map(x => `<option value="${x.id}"${x.id === d.resourceId ? ' selected' : ''}>${esc(x.name)}${fullSubOf(x.id) ? ' — сдан' : ''}</option>`).join('')}</optgroup>` : ''; }).join('');
   let startOpts = '', endOpts = '';
   for (let m = OPEN; m < CLOSE; m += STEP) if (m <= CLOSE - minD || m === d.start) startOpts += `<option value="${m}"${m === d.start ? ' selected' : ''}>${hm(m)}</option>`;
   for (let m = d.start + STEP; m <= CLOSE; m += STEP) if (m - d.start >= minD || m === d.end) endOpts += `<option value="${m}"${m === d.end ? ' selected' : ''}>${hm(m)} · ${durTxt(m - d.start)}</option>`;
@@ -1693,7 +1703,7 @@ function subSheet(){
   const tenantBlock = t
     ? `<div class="tchip">${avatar(t, 'sm')}<span class="lmain"><b>${esc(t.name)}</b><small>${esc(t.activity || '')}${t.phone ? ' · ' + esc(t.phone) : ''}</small></span><button type="button" class="link-btn" data-action="clear-tenant">Сменить</button></div>`
     : `<div class="search">${ICON.search}<input id="tSearch" type="search" placeholder="Имя или телефон" value="${esc(s.tq)}" autocomplete="off" aria-label="Найти арендатора"></div><div class="tpick" id="tPick">${tenantPick()}</div>`;
-  const resOpts = KIND_ORDER.map(k => { const list = cfg.resources.filter(x => x.kind === k && (x.active || x.id === d.resourceId)); return list.length ? `<optgroup label="${KINDS[k].many}">${list.map(x => `<option value="${x.id}"${x.id === d.resourceId ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}</optgroup>` : ''; }).join('');
+  const resOpts = KIND_ORDER.map(k => { const list = sortRes(cfg.resources.filter(x => x.kind === k && (x.active || x.id === d.resourceId))); return list.length ? `<optgroup label="${KINDS[k].many}">${list.map(x => `<option value="${x.id}"${x.id === d.resourceId ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}</optgroup>` : ''; }).join('');
   const dayChips = DOW_ORDER.map(x => `<button type="button" class="chip" data-action="sub-day" data-v="${x}" aria-pressed="${d.days.includes(x)}">${DOW[x]}</button>`).join('');
   const all = d.days.length === 7;
   const alerts = (other.length ? `<div class="alert" role="alert"><b>Эти дни уже заняты постоянной арендой:</b> ${other.map(x => `${esc(ten(x.tenantId).name)} (${esc(daysTxt(x.days))})`).join('; ')}. Выберите другие дни или место.</div>` : '')
