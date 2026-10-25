@@ -665,7 +665,8 @@ async function deleteBlob(name){
 }
 
 /* Компактное кодирование: одна бронь ≈ 55 символов */
-const CFG_V = 2;
+const CFG_V = 3;
+const PRICE_HOUR = 450, PRICE_DAY = 5000;   // цена по умолчанию для всех мест
 const encCfg = () => JSON.stringify({v:CFG_V, minDur:cfg.minDur, res:cfg.resources.map(r => [r.id, r.kind, r.name, r.note, r.hour, r.day, r.active ? 1 : 0]), cats:cfg.cats.map(c => [c.id, c.name, c.hidden ? 1 : 0])});
 const decCfg = str => { const o = JSON.parse(str); return {v:o.v || 1, minDur:o.minDur || 60, resources:o.res.map(r => ({id:r[0], kind:r[1], name:r[2], note:r[3] || '', hour:r[4], day:r[5], active:!!r[6]})), cats:o.cats ? o.cats.map(c => ({id:c[0], name:c[1], hidden:!!c[2]})) : defaultCats()}; };
 const encTen = list => JSON.stringify(list.map(t => [t.id, t.name, t.activity || '', t.phone || '', t.tg || '', t.note || '']));
@@ -692,15 +693,15 @@ const decRec = str => str ? JSON.parse(str).map(r => ({id:r[0], cat:r[1], amount
    ========================================================= */
 const defaultCats = () => EXP_CATS.map((name, id) => ({id, name, hidden:false}));
 const defaultCfg = () => ({v:CFG_V, minDur:60, cats:defaultCats(), resources:[
-  {id:'c1', kind:'cab', name:'Кабинет 1', note:'', hour:400, day:4800, active:true},
-  {id:'c2', kind:'cab', name:'Кабинет 2', note:'', hour:400, day:4800, active:true},
-  {id:'c3', kind:'cab', name:'Кабинет 3', note:'', hour:400, day:4800, active:true},
-  {id:'c4', kind:'cab', name:'Кабинет 4', note:'', hour:400, day:4800, active:true},
-  {id:'s1', kind:'sty', name:'Стилист 1', note:'', hour:400, day:4800, active:true},
-  {id:'s2', kind:'sty', name:'Стилист 2', note:'', hour:400, day:4800, active:true},
-  {id:'s3', kind:'sty', name:'Стилист 3', note:'', hour:400, day:4800, active:true},
-  {id:'b1', kind:'bar', name:'Барбер 1',  note:'', hour:400, day:4800, active:true},
-  {id:'b2', kind:'bar', name:'Барбер 2',  note:'', hour:400, day:4800, active:true}
+  {id:'c1', kind:'cab', name:'Кабинет 1', note:'', hour:PRICE_HOUR, day:PRICE_DAY, active:true},
+  {id:'c2', kind:'cab', name:'Кабинет 2', note:'', hour:PRICE_HOUR, day:PRICE_DAY, active:true},
+  {id:'c3', kind:'cab', name:'Кабинет 3', note:'', hour:PRICE_HOUR, day:PRICE_DAY, active:true},
+  {id:'c4', kind:'cab', name:'Кабинет 4', note:'', hour:PRICE_HOUR, day:PRICE_DAY, active:true},
+  {id:'s1', kind:'sty', name:'Стилист 1', note:'', hour:PRICE_HOUR, day:PRICE_DAY, active:true},
+  {id:'s2', kind:'sty', name:'Стилист 2', note:'', hour:PRICE_HOUR, day:PRICE_DAY, active:true},
+  {id:'s3', kind:'sty', name:'Стилист 3', note:'', hour:PRICE_HOUR, day:PRICE_DAY, active:true},
+  {id:'b1', kind:'bar', name:'Барбер 1',  note:'', hour:PRICE_HOUR, day:PRICE_DAY, active:true},
+  {id:'b2', kind:'bar', name:'Барбер 2',  note:'', hour:PRICE_HOUR, day:PRICE_DAY, active:true}
 ]});
 let cfg = defaultCfg();
 let tenants = [], bookings = [], expenses = [], recurring = [], subs = [];
@@ -753,14 +754,6 @@ async function loadAll(){
   heads.forEach(h => { const p = parseHeader(vals[h]); if (p) for (let i = 0; i < p.n; i++) live.add(chunkKey(h, p.ver, i)); });
   const cfgStr = joinFrom('cfg', vals);
   cfg = cfgStr ? decCfg(cfgStr) : defaultCfg();
-  if (cfgStr && cfg.v < 2){   // разово: добавить Кабинет 2, если его ещё нет
-    if (!cfg.resources.some(r => norm(r.name) === 'кабинет 2')){
-      const c1 = cfg.resources.find(r => r.id === 'c1') || {hour:400, day:4800};
-      cfg.resources.push({id:cfg.resources.some(r => r.id === 'c2') ? newId('r') : 'c2', kind:'cab', name:'Кабинет 2', note:'', hour:c1.hour, day:c1.day, active:true});
-    }
-    cfg.v = CFG_V;
-    if (!cfgSeeded){ cfgSeeded = true; persist(() => writeBlob('cfg', encCfg())); }
-  }
   tenants = decTen(joinFrom('ten', vals));
   recurring = decRec(joinFrom('rex', vals));
   subs = decSub(joinFrom('sub', vals));
@@ -770,6 +763,19 @@ async function loadAll(){
     else if (/^e\d{6}$/.test(h)) el.push(...decExp(h, joinFrom(h, vals)));
   });
   bookings = bl; expenses = el;
+  if (cfgStr && cfg.v < CFG_V){
+    if (cfg.v < 2 && !cfg.resources.some(r => norm(r.name) === 'кабинет 2')){   // разово: добавить Кабинет 2
+      cfg.resources.push({id:cfg.resources.some(r => r.id === 'c2') ? newId('r') : 'c2', kind:'cab', name:'Кабинет 2', note:'', hour:PRICE_HOUR, day:PRICE_DAY, active:true});
+    }
+    if (cfg.v < 3){   // разово: новая цена 450 ₽/ч и 5 000 ₽ за день для всех мест и будущих броней по тарифу
+      cfg.resources.forEach(r => { r.hour = PRICE_HOUR; r.day = PRICE_DAY; });
+      const upd = bookings.filter(b => b.date >= TODAY && b.status === 'active' && !b.priceManual);
+      upd.forEach(b => { b.price = calcPrice(res(b.resourceId), b.kind, b.start, b.end); });
+      if (upd.length && !cfgSeeded) persistBookings(upd);
+    }
+    cfg.v = CFG_V;
+    if (!cfgSeeded){ cfgSeeded = true; persist(() => writeBlob('cfg', encCfg())); }
+  }
   const orphans = keys.filter(k => !live.has(k));
   if (orphans.length) kv.del(orphans).catch(() => {});     // остатки недописанных сохранений
   usage.keys = keys.length - orphans.length;
@@ -1607,7 +1613,7 @@ function tenantEditSheet(){
   </div><div class="sheet-foot"><button class="btn" data-action="save-tenant">Сохранить</button></div>`;
 }
 function resourceSheet(){
-  const r = sheet.id ? res(sheet.id) : {name:'', kind:'cab', note:'', hour:400, day:4800, active:true};
+  const r = sheet.id ? res(sheet.id) : {name:'', kind:'cab', note:'', hour:PRICE_HOUR, day:PRICE_DAY, active:true};
   const future = sheet.id ? bookings.filter(b => b.resourceId === r.id && b.date >= TODAY && b.status === 'active').length : 0;
   return sheetHead(sheet.id ? esc(r.name) : 'Новое место', sheet.id ? KINDS[r.kind].one : 'Кабинет, стилист или барбер') + `<div class="sheet-body">
     <div class="row2">
@@ -1626,7 +1632,7 @@ function resourceSheet(){
   </div><div class="sheet-foot"><button class="btn" data-action="save-resource">Сохранить</button></div>`;
 }
 function priceAllSheet(){
-  const r = cfg.resources[0] || {hour:400, day:4800};
+  const r = cfg.resources[0] || {hour:PRICE_HOUR, day:PRICE_DAY};
   return sheetHead('Цена для всех мест', `${cfg.resources.length} ${plural(cfg.resources.length,'место','места','мест')}`) + `<div class="sheet-body">
     <div class="row2">
       <div class="field"><label class="lbl" for="paHour">Час, ₽</label><input type="number" id="paHour" min="0" step="50" inputmode="numeric" value="${r.hour}"></div>
